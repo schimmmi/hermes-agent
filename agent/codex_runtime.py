@@ -265,6 +265,33 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                             len(agent._codex_streamed_text_parts), len(assembled),
                         )
                 return final_response
+        except TypeError as exc:
+            # gpt-5.5 on chatgpt.com/backend-api/codex sometimes emits a
+            # response.completed event with output=None.  The OpenAI SDK's
+            # parse_response() then raises TypeError: 'NoneType' object is
+            # not iterable.  Recover from collected stream items or deltas
+            # before giving up.
+            err_text = str(exc)
+            if "NoneType" in err_text and "iterable" in err_text and (
+                collected_output_items or agent._codex_streamed_text_parts
+            ):
+                logger.debug(
+                    "Codex stream: SDK raised TypeError (output=None in response.completed); "
+                    "recovering from %d collected items / %d delta chars. %s",
+                    len(collected_output_items),
+                    sum(len(p) for p in agent._codex_streamed_text_parts),
+                    agent._client_log_context(),
+                )
+                if collected_output_items:
+                    recovered_output = list(collected_output_items)
+                else:
+                    assembled = "".join(agent._codex_streamed_text_parts)
+                    recovered_output = [SimpleNamespace(
+                        type="message", role="assistant", status="completed",
+                        content=[SimpleNamespace(type="output_text", text=assembled)],
+                    )]
+                return SimpleNamespace(output=recovered_output, status="completed")
+            raise
         except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
             if attempt < max_stream_retries:
                 logger.debug(
